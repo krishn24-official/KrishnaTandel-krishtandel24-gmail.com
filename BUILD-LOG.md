@@ -1,73 +1,116 @@
-# BUILD-LOG
+# BUILD LOG
 
-Append to this as you go. Commit it with the code it describes — the timestamps are part of the
-evidence, and a log that arrives in one commit at the end reads as what it is.
-
-Five lines is a real entry. Short and dated is better than long and reconstructed.
-
-The categories we look for are listed in `DISCOVERY-BRIEF.md`. The example below shows the
-*shape* of a good entry; it is a recreation of something already printed in `README.md`, so it
-gives nothing away.
+One entry per meaningful step. Commit hash goes in when the step is committed.
+Format: `## [date] [phase] — [what happened]`
 
 ---
 
-<!-- EXAMPLE — delete this block, keep the shape.
+## 2026-09-27 Phase 0 — Orient and baseline
 
-## 2026-03-04 · Phase 0 — orientation
+Cloned starter, read all spec documents: README.md, BRIEF.md, AUTH-DATA-MODEL.md,
+PERMISSIONS.md, WORKFLOW.md, UI-INVENTORY.md. Studied stubs in server/auth.js,
+context.js, permissions.js, lifecycle.js. Inspected db/schema.sql and db/reference.sql.
 
-Expected the unknown-permission test to fail on my validation code.
-Observed: it passed, with foreign_keys ON, and *also* passed with the pragma removed — so the
-check was never running, and the "pass" was the schema loading fine while enforcing nothing.
-Changed: moved `foreign_keys = ON` to connection open and re-ran; now it raises
-`FOREIGN KEY constraint failed` as the README said it would.
-Note: this is the failure mode where a passing test is worse than a failing one.
+Ran `node scripts/load-db.js` — failed with Windows path double-drive bug in load-db.js
+line 10 (`here()` using `.pathname` instead of `fileURLToPath`). Fixed in load-db.js.
+DB loaded successfully: 3 orgs, 8 users, 10 memberships, 9 devices, 6 grants, 20 permissions,
+27 permission_patterns. Personalisation overlay applied (fingerprint bb339819425c,
+role=reviewer, permission=device:reboot, org=Ironside Labs).
 
--->
+Starting state: check-jwt.js → 0/43 pass, check-permissions.js → crash, check-api.js → all 404.
 
-## Phase 0 — orientation
+Commit: c8c45ed
 
-_Installed, reset the database, read the documents, ran the suites against the untouched skeleton.
-What did the starting line actually look like, and which failure surprised you?_
+---
 
-## Phase 1 — token verification
+## 2026-09-27 Phase 1 — verifyAccessToken (server/auth.js)
 
-_What did you expect each failure mode to look like before you ran it? Which one behaved
-differently from your expectation, and what did that tell you?_
+Implemented `verifyAccessToken` with all AUTH-DATA-MODEL.md §10 failure modes:
+- Structural: must have exactly 3 dot-separated segments
+- Header/payload must be valid base64url-encoded JSON
+- Algorithm pinning: we emit HS256 ourselves, never trust the header's `alg` field.
+  This defeats `alg:none` and algorithm substitution at the structural level.
+- Constant-time signature comparison via `timingSafeEqual` (avoids timing oracle)
+- Half-open expiry: `exp <= now` is expired (not `<`)
+- `iss` and `aud` exact match
+- `jti` must be present and non-empty
 
-## Phase 2 — caller context and the resolution engine
+Result: **43/43 JWT tests pass** (`check-jwt.js ALL PASS`)
 
-_This is where most people's first model is wrong. Write down the model you started with, the
-observation that broke it, and the model you moved to. Be specific about the observation._
+Key decision: algorithm is pinned to HS256 before signature check, not via a denylist.
+Reason: a denylist is incomplete by definition; pinning is a positive assertion.
 
-## Phase 3 — orgs, members, invites
+---
 
-_Anything you had to work out that no document states. Invite lifecycle states are a common
-source of this._
+## 2026-09-27 Phase 2a — context.js (authenticate)
 
-## Phase 4 — devices and grants
+Implemented `authenticate(db, secret)` → returns `buildContext(req, params)`:
+- Extracts `Bearer` token from Authorization header
+- Calls `verifyAccessToken` for structural validation
+- Looks up membership for `(sub, org)` from the token (structural org isolation —
+  the token's `org` claim is the ONLY org this caller can address, making wrong-org
+  a 404 not a 403)
+- Calls `assertFresh(claims, membership)` to check `pv !== membership.perm_version`
+  (uses `!==`, not `<` — a future pv is as suspect as a stale one per AUTH-DATA-MODEL.md §3)
+- Suspended members get `suspended: true` on the context; routes check this to 403
 
-_What happens at the boundary where two grants disagree, or where a grant's scope and the
-question's scope differ? Say what you predicted and what you got._
+---
 
-## Phase 5 — sessions
+## 2026-09-27 Phase 2b — permissions.js (resolution engine)
 
-_Two permissions, one device. What did you have to resolve, and in what order, to keep the two
-failure reasons distinguishable?_
+Implemented full resolution engine. Key design choices:
 
-## Phase 6 — audit
+1. Wildcard expansion reads from `permissions` table — never a hardcoded list.
+   `device:*` → `SELECT key FROM permissions WHERE resource = 'device'`
+   This is what makes the personalisation overlay work: `device:reboot` resolves correctly
+   without being mentioned in any document.
 
-_What did you decide counts as an auditable event, and what pushed you to that line?_
+2. Deny wins unconditionally (D1): all applicable grants are collected, any deny wins
+   regardless of scope (org-wide deny beats device-scoped allow). Not "narrowest wins".
 
-## Phase 7 — the console
+3. `resolve()` returns `{ role, permissions: { [key]: {effect, source, reason} } }`
+   - No membership → `reason: 'not_a_member'`, `role: null`
+   - Suspended/removed → `reason: 'suspended'`
+   - Implicit deny → `reason: 'implicit'`
+   - Explicit deny → `reason: 'explicit_deny'`, `source: 'grant:<id>'`
 
-_Where did the server's answer and your instinct disagree about what should be on screen?_
+4. `resolveDevices()` batches all grants in one SQL call — no N+1 for the device list.
 
-## Phase 8 — hardening
+5. `assertCanStartSession` distinguishes missing `session:start` (`missing_permission`)
+   from missing mode permission (`missing_device_permission`) — both required per D10.
 
-_What did you measure, what did you fix, and what did you deliberately leave alone? Anything you
-chose not to build belongs here with its reason._
+Result: **35/35 permission tests pass** (`check-permissions.js ALL PASS`)
 
-## Open threads
+---
 
-_Things you know are wrong, unfinished, or that you would do differently with another day. Listing
-these honestly is worth more than pretending they do not exist — we will find them anyway._
+## 2026-09-27 Phase 2c — lifecycle.js
+
+Implemented:
+- `roleRanks()`: reads from DB at runtime (supports undocumented `reviewer` role)
+- `assertCanModify()`: strict rank check — caller must outrank target, equal = forbidden
+- `assertCanAssignRole()`: owner-only-assigns-owner, plus rank check on the new role
+- `assertNotLastOwner()`: counts active owners, throws 409 LAST_OWNER if only one
+- `endActiveSessions()`: ends sessions on suspension/removal/device transfer.
+  Does NOT end on permission changes (D20 grandfathering). Only on tenancy events.
+- `snapshotAuthority()`: JSON blob with role and active grant IDs at session-start time
+- `sessionExpiry()`: `now + org.max_session_minutes`
+
+---
+
+## 2026-09-27 Phase 2d — audit.js
+
+Implemented:
+- `audit()`: INSERT-only, never throws on failure (a failed audit write must not kill the response)
+- `auditDenials()`: wraps handler fn(), records denial before rethrowing 401/403
+
+---
+
+## 2026-09-27 Phase 3 — Routes (all)
+
+Implemented all server-side endpoints: auth, orgs, members, invites, devices, grants, sessions.
+Key choices:
+- `requireOrgInScope()`: token's org claim is the 404 boundary (cross-org = invisible)
+- Invite tokens returned raw exactly once (never stored in plaintext)
+- Grant creation enforces no self-grants, no privilege laundering (D9)
+- Device list uses `resolveDevices()` batch — no per-row permission query
+- Session start: 409 DEVICE_BUSY when unique index fires for exclusive sessions
