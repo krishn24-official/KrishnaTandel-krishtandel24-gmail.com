@@ -128,3 +128,35 @@ Results:
 - `check-personalisation.js`: **18/18 passed**
 - `check-api.js`: **66/66 passed**
 
+Commit: 3f774cc
+
+---
+
+## 2026-09-27 Phase 4 — Web Console SPA & E2E Contract
+
+Implemented the React single page application in `web/main.jsx` and design system in `web/index.css`.
+Key design choices & guarantees:
+1. **Server-resolved presence semantics (UI-INVENTORY.md §5)**:
+   Elements are rendered (`data-state="unlocked"`) or absent. Zero client-side role matrices; all gating is driven by `permissions` returned from `GET /v1/auth/me` and per-device permissions returned from `GET /v1/orgs/:org/devices`. When the server denies, the element disappears.
+2. **In-memory token security (D13)**:
+   Access token lives strictly in React memory state. Zero tokens written to `localStorage` or `sessionStorage`. On page refresh, session restores seamlessly via httpOnly `remoteops_refresh` cookie calling `POST /v1/auth/refresh`.
+3. **Multi-org isolation & theming**:
+   App shell reflects active org identity via `data-org-id` and `data-org-theme`. Visual background color shifts measurably between themes (`cobalt`, `amber`, `moss`, `plum`, `rust`, `teal`). Cross-org content never leaks into the DOM.
+4. **All console views implemented**:
+   - Fleet Devices: per-device action buttons (Control, Terminal, View) gated by device-level resolved permissions.
+   - People / Team: member list with roles and statuses.
+   - Grants: active grant cards, inline scoped grant creation form with member & device select, and revocation.
+   - Sessions: active and past session history.
+   - Audit Trail: immutable audit log entries.
+   - Admin: Rename organization (`org:update`) and Delete organization (`org:delete`).
+   - Invite redemption: `/invite/:token` public peek and member accept flow with strict anti-leak guarantees.
+
+E2E debugging:
+- Installed missing Playwright headless shell via `npx playwright install chromium`.
+- Identified and fixed static file serving bug on Windows in `server/index.js:22`: `new URL('../dist/', import.meta.url).pathname` produced a path with a leading slash (`/C:/...`), causing `stat()` and `readFile()` to fail and return 404 for `GET /`. Switched to `fileURLToPath` from `node:url`.
+
+Results:
+- `npm run build`: built production bundle in 1.79s
+- Playwright E2E suite (`npx playwright test`): **25/25 passed (100%)**
+
+

@@ -136,6 +136,18 @@ One section per decision that a reviewer might reasonably have made differently.
 
 ---
 
+### Server-resolved presence semantics over client role matrices (D12/D13)
+
+**What I chose:** In `web/main.jsx`, all interactive elements (navigation cards, device controls, admin buttons) are conditionally rendered strictly according to the server's resolved permission payload (`effect === 'allow'`), rendering with `data-state="unlocked"` when permitted and omitted from the DOM entirely when denied.
+
+**Why:** Enforced directly by the architecture test `tests/ui.spec.js:139`: "an element vanishes when the server withdraws the permission". In that test, Playwright intercepts `**/v1/orgs/*/devices` and overrides `device:control` to `deny` for an owner. If the client used a role matrix like `if (role === 'owner')`, the button would stay visible and fail the test. The server is the single source of truth for authorization.
+
+**What I rejected:** Using client-side disabled buttons (`<button disabled>`) or role-based view branching (`if (role === 'admin')`). Disabled buttons leak the existence of functionality to unprivileged actors, and client-side role mapping drifts from backend authorization policies.
+
+**What would change my mind:** If client-side offline authorization caching with local evaluation was explicitly mandated by product requirements.
+
+---
+
 ## Where this repo argues with itself
 
 **PERMISSIONS.md vs AUTH-DATA-MODEL.md on `pv` semantics:**
