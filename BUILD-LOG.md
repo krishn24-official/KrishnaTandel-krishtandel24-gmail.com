@@ -159,4 +159,16 @@ Results:
 - `npm run build`: built production bundle in 1.79s
 - Playwright E2E suite (`npx playwright test`): **25/25 passed (100%)**
 
+Commit: 42af434
+
+---
+
+## 2026-09-27 Dev & Start Scripts Polish
+
+- **Bug**: Running `npm run dev` resulted in an infinite restart loop (`Restarting 'server/index.js'`).
+- **Root Cause**: `package.json` had `"dev": "node --watch-path=./server --watch server/index.js"`. The presence of `--watch` alongside `--watch-path` caused Node to watch the entry point and all imported modules. When Vite initialized in middleware mode, it wrote to its internal dependency cache in `node_modules/.vite`, which Node's global `--watch` detected as file changes, constantly re-triggering restarts.
+- **Fix**: Removed the redundant `--watch` flag to restrict watching specifically to `--watch-path=./server`. Dev server now boots stably with instant Vite HMR for React and hot-reloading when server code changes.
+- **Start Script**: Updated `"start"` script to use Node's `-e` inline environment setter so it runs seamlessly on Windows PowerShell/CMD without POSIX syntax errors.
+
+
 
