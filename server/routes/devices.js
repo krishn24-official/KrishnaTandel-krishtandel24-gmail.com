@@ -1,5 +1,5 @@
 // Device and grant routes
-import { send, badRequest, notFound, forbidden, conflict } from '../http.js';
+import { send, badRequest, notFound, forbidden, conflict, HttpError } from '../http.js';
 import { newId, nowIso, bumpPermVersion } from '../db.js';
 import { assertCan, can, resolveDevices, assertMayGrant } from '../permissions.js';
 import { endActiveSessions } from '../lifecycle.js';
@@ -156,7 +156,15 @@ export function registerDeviceRoutes(router, { db, secret }) {
     const normExpires = normalizeTs(expiresAt ?? null, 'expiresAt');
     const nowStr = nowIso();
     if (normExpires && normExpires <= nowStr) {
-      throw Object.assign(new Error('expiresAt is in the past'), { status: 400, code: 'GRANT_EXPIRED', reason: null });
+      throw new HttpError(400, 'GRANT_EXPIRED', 'expiresAt is in the past');
+    }
+
+    // D19: validate that all requested permissions exist in permission_patterns table
+    const validPatterns = new Set(db.prepare('SELECT pattern FROM permission_patterns').all().map(r => r.pattern));
+    for (const p of permissions) {
+      if (!validPatterns.has(p)) {
+        throw badRequest(`unknown permission: ${p}`, 'unknown_permission');
+      }
     }
 
     // No privilege laundering: caller must hold every permission they're granting (D9)
@@ -172,7 +180,10 @@ export function registerDeviceRoutes(router, { db, secret }) {
       for (const p of permissions) {
         try { insertPerm.run(grantId, p); }
         catch (err) {
-          if (err.message?.includes('FOREIGN KEY')) throw badRequest(`unknown permission: ${p}`);
+          if (err.message?.includes('FOREIGN KEY')) {
+            // The FK on grant_permissions rejects unknown permission strings (D19)
+            throw badRequest(`unknown permission: ${p}`, 'unknown_permission');
+          }
           throw err;
         }
       }

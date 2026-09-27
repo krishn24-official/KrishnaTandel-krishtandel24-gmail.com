@@ -17,7 +17,7 @@ export function registerInviteRoutes(router, { db, secret }) {
         WHERE i.token_hash = ?`
     ).get(hash);
 
-    if (!invite) throw gone('invite not found or expired');
+    if (!invite) throw notFound('invite not found or expired');
     if (invite.revoked_at) throw gone('invite has been revoked');
     if (invite.accepted_at) throw conflict('invite has already been accepted');
     if (invite.expires_at <= nowIso()) throw gone('invite has expired');
@@ -42,9 +42,8 @@ export function registerInviteRoutes(router, { db, secret }) {
         WHERE i.token_hash = ?`
     ).get(hash);
 
-    if (!invite) throw gone('invite not found or expired');
+    if (!invite) throw notFound('invite not found or expired');
     if (invite.revoked_at) throw gone('invite has been revoked');
-    if (invite.expired_at <= nowIso()) throw gone('invite has expired');
     if (invite.accepted_at) throw conflict('invite has already been accepted');
     if (invite.expires_at <= nowIso()) throw gone('invite has expired');
 
@@ -123,6 +122,6 @@ export function registerInviteRoutes(router, { db, secret }) {
     res.setHeader('Set-Cookie', cookieFlags.join('; '));
 
     audit(db, { orgId: invite.org_id, actorId: userId, action: 'invite.accept', targetType: 'invite', targetId: invite.id, result: 'allow', requestId: ctx.requestId ?? null });
-    send(res, 200, { accessToken, orgId: invite.org_id });
+    send(res, 200, { token: accessToken, orgId: invite.org_id, role: invite.role });
   });
 }

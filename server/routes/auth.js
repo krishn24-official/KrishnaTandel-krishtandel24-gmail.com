@@ -3,7 +3,7 @@ import {
   verifyPassword, hashPassword, newRefreshToken, hashRefreshToken,
   issueAccessToken, assertFresh,
 } from '../auth.js';
-import { unauthenticated, forbidden, notFound, badRequest, conflict } from '../http.js';
+import { send, unauthenticated, notFound, badRequest } from '../http.js';
 import { newId, nowIso, bumpPermVersion } from '../db.js';
 import { orgLevelPermissions } from '../permissions.js';
 
@@ -11,8 +11,8 @@ const REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 export function registerAuthRoutes(router, { db, secret }) {
   // POST /v1/auth/login
-  router.post('/v1/auth/login', async (ctx, _params, res) => {
-    const { email, password } = ctx.body;
+  router.post('/v1/auth/login', (ctx, _params, res) => {
+    const { email, password } = ctx.body ?? {};
     if (!email || !password) throw badRequest('email and password are required');
 
     // Anti-enumeration: wrong email and wrong password return identical errors.
@@ -21,9 +21,9 @@ export function registerAuthRoutes(router, { db, secret }) {
       throw unauthenticated('invalid credentials');
     }
 
-    // Find the user's memberships — pick first active org alphabetically
+    // Find user's active memberships — pick first active org alphabetically by org id
     const memberships = db.prepare(
-      `SELECT m.org_id, m.role, m.status, m.perm_version
+      `SELECT m.org_id, m.role, m.status, m.perm_version, o.name AS orgName, o.theme
          FROM memberships m
          JOIN organizations o ON o.id = m.org_id
         WHERE m.user_id = ? AND m.status = 'active' AND o.deleted_at IS NULL
@@ -33,7 +33,7 @@ export function registerAuthRoutes(router, { db, secret }) {
     if (!memberships.length) throw unauthenticated('no active organization memberships');
 
     const mem = memberships[0];
-    const accessToken = issueAccessToken({
+    const token = issueAccessToken({
       userId: user.id, orgId: mem.org_id, role: mem.role, permVersion: mem.perm_version,
     }, secret);
 
@@ -46,7 +46,6 @@ export function registerAuthRoutes(router, { db, secret }) {
       `INSERT INTO refresh_tokens (id, user_id, token_hash, family_id, expires_at) VALUES (?,?,?,?,?)`
     ).run(newId('rtk'), user.id, hash, familyId, expiresAt);
 
-    // Set refresh token cookie
     const cookieFlags = [
       `remoteops_refresh=${raw}`,
       'HttpOnly', 'SameSite=Strict',
@@ -56,13 +55,18 @@ export function registerAuthRoutes(router, { db, secret }) {
     if (process.env.NODE_ENV === 'production') cookieFlags.push('Secure');
     res.setHeader('Set-Cookie', cookieFlags.join('; '));
 
-    const { send } = await import('../http.js');
-    send(res, 200, { accessToken, orgId: mem.org_id });
+    // Shape: { token, orgId, role, orgs }
+    send(res, 200, {
+      token,
+      orgId: mem.org_id,
+      role: mem.role,
+      orgs: memberships.map(m => ({ id: m.org_id, name: m.orgName, theme: m.theme, role: m.role })),
+    });
   });
 
   // POST /v1/auth/refresh
-  router.post('/v1/auth/refresh', async (ctx, _params, res) => {
-    const cookieHeader = ctx.req.headers['cookie'] ?? '';
+  router.post('/v1/auth/refresh', (ctx, _params, res) => {
+    const cookieHeader = ctx.req?.headers['cookie'] ?? '';
     const match = cookieHeader.match(/(?:^|;\s*)remoteops_refresh=([^;]+)/);
     if (!match) throw unauthenticated('missing refresh token');
 
@@ -76,7 +80,6 @@ export function registerAuthRoutes(router, { db, secret }) {
 
     if (!rt) throw unauthenticated('invalid refresh token');
 
-    // Replay detection: if this token is revoked, revoke the whole family
     if (rt.revoked_at) {
       db.prepare(`UPDATE refresh_tokens SET revoked_at = ? WHERE family_id = ?`).run(now, rt.family_id);
       throw unauthenticated('refresh token replayed — family revoked');
@@ -84,7 +87,6 @@ export function registerAuthRoutes(router, { db, secret }) {
 
     if (rt.expires_at <= now) throw unauthenticated('refresh token expired');
 
-    // Rotate: revoke old, issue new in same family
     db.prepare(`UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?`).run(now, rt.id);
 
     const newRaw = newRefreshToken();
@@ -94,18 +96,18 @@ export function registerAuthRoutes(router, { db, secret }) {
       `INSERT INTO refresh_tokens (id, user_id, token_hash, family_id, expires_at) VALUES (?,?,?,?,?)`
     ).run(newId('rtk'), rt.user_id, newHash, rt.family_id, expiresAt);
 
-    // Find first active membership
-    const mem = db.prepare(
-      `SELECT m.org_id, m.role, m.status, m.perm_version
+    const memberships = db.prepare(
+      `SELECT m.org_id, m.role, m.status, m.perm_version, o.name AS orgName, o.theme
          FROM memberships m
          JOIN organizations o ON o.id = m.org_id
         WHERE m.user_id = ? AND m.status = 'active' AND o.deleted_at IS NULL
-        ORDER BY o.id ASC LIMIT 1`
-    ).get(rt.user_id);
+        ORDER BY o.id ASC`
+    ).all(rt.user_id);
 
-    if (!mem) throw unauthenticated('no active memberships');
+    if (!memberships.length) throw unauthenticated('no active memberships');
 
-    const accessToken = issueAccessToken({
+    const mem = memberships[0];
+    const token = issueAccessToken({
       userId: rt.user_id, orgId: mem.org_id, role: mem.role, permVersion: mem.perm_version,
     }, secret);
 
@@ -118,16 +120,19 @@ export function registerAuthRoutes(router, { db, secret }) {
     if (process.env.NODE_ENV === 'production') cookieFlags.push('Secure');
     res.setHeader('Set-Cookie', cookieFlags.join('; '));
 
-    const { send } = await import('../http.js');
-    send(res, 200, { accessToken, orgId: mem.org_id });
+    send(res, 200, {
+      token,
+      orgId: mem.org_id,
+      role: mem.role,
+      orgs: memberships.map(m => ({ id: m.org_id, name: m.orgName, theme: m.theme, role: m.role })),
+    });
   });
 
-  // POST /v1/auth/token — org switch
-  router.post('/v1/auth/token', async (ctx, _params, res) => {
-    const { orgId } = ctx.body;
+  // POST /v1/auth/token — org switch (access token only, same refresh token)
+  router.post('/v1/auth/token', (ctx, _params, res) => {
+    const { orgId } = ctx.body ?? {};
     if (!orgId) throw badRequest('orgId is required');
 
-    // Verify caller has an active membership in the target org
     const mem = db.prepare(
       `SELECT m.role, m.status, m.perm_version
          FROM memberships m
@@ -137,16 +142,15 @@ export function registerAuthRoutes(router, { db, secret }) {
 
     if (!mem) throw notFound('organization not found or no active membership');
 
-    const accessToken = issueAccessToken({
+    const token = issueAccessToken({
       userId: ctx.userId, orgId, role: mem.role, permVersion: mem.perm_version,
     }, secret);
 
-    const { send } = await import('../http.js');
-    send(res, 200, { accessToken, orgId });
+    send(res, 200, { token, orgId, role: mem.role });
   });
 
   // GET /v1/auth/me
-  router.get('/v1/auth/me', async (ctx, _params, res) => {
+  router.get('/v1/auth/me', (ctx, _params, res) => {
     const user = db.prepare('SELECT id, email, name FROM users WHERE id = ?').get(ctx.userId);
     if (!user) throw notFound();
 
@@ -159,10 +163,8 @@ export function registerAuthRoutes(router, { db, secret }) {
     ).all(ctx.userId);
 
     const permissions = orgLevelPermissions(db, { userId: ctx.userId, orgId: ctx.orgId });
-
     const org = db.prepare('SELECT id, name, theme FROM organizations WHERE id = ?').get(ctx.orgId);
 
-    const { send } = await import('../http.js');
     send(res, 200, {
       user: { id: user.id, email: user.email, name: user.name },
       org,

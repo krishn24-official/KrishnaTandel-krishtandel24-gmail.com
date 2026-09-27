@@ -49,7 +49,7 @@ export function registerOrgRoutes(router, { db, secret }) {
     })();
 
     audit(db, { orgId, actorId: ctx.userId, action: 'org.create', targetType: 'org', targetId: orgId, result: 'allow', requestId: ctx.requestId });
-    send(res, 201, { id: orgId, name: name.trim(), theme: finalTheme });
+    send(res, 201, { id: orgId, name: name.trim(), theme: finalTheme, role: 'owner' });
   });
 
   // PATCH /v1/orgs/:org — rename/reconfigure
@@ -107,6 +107,9 @@ export function registerOrgRoutes(router, { db, secret }) {
     const { role: newRole } = ctx.body;
     if (!newRole) throw badRequest('role is required');
     assertRoleExists(db, newRole);
+    if (target.role === 'owner' && newRole !== 'owner') {
+      assertNotLastOwner(db, params.org, params.userId);
+    }
     assertCanModify(db, ctx.role, target.role);
     assertCanAssignRole(db, ctx.role, newRole);
 
@@ -227,7 +230,7 @@ export function registerOrgRoutes(router, { db, secret }) {
 
     audit(db, { orgId: params.org, actorId: ctx.userId, action: 'invite.create', targetType: 'invite', targetId: inviteId, result: 'allow', requestId: ctx.requestId });
     // Return raw token exactly once — never stored in plaintext
-    send(res, 201, { id: inviteId, token: rawToken, email: normalizedEmail, role, expiresAt });
+    send(res, 201, { id: inviteId, inviteToken: rawToken, email: normalizedEmail, role, expiresAt });
   });
 
   // GET /v1/orgs/:org/invites
@@ -273,14 +276,38 @@ export function registerOrgRoutes(router, { db, secret }) {
 
   // ── Audit ─────────────────────────────────────────────────────────────────
 
-  // GET /v1/orgs/:org/audit
+  // GET /v1/orgs/:org/audit — with pagination
   router.get('/v1/orgs/:org/audit', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'audit:read');
+
+    // Parse and validate limit + offset from ctx.query (URLSearchParams)
+    const rawLimit = ctx.query?.get('limit') ?? null;
+    const rawOffset = ctx.query?.get('offset') ?? null;
+
+    const MAX_LIMIT = 1000;
+    let limit = 100;
+    let offset = 0;
+
+    if (rawLimit !== null) {
+      const n = Number(rawLimit);
+      if (!Number.isInteger(n) || n < 1 || n > MAX_LIMIT) {
+        throw badRequest(`limit must be an integer between 1 and ${MAX_LIMIT}`);
+      }
+      limit = n;
+    }
+    if (rawOffset !== null) {
+      const n = Number(rawOffset);
+      if (!Number.isInteger(n) || n < 0) {
+        throw badRequest('offset must be a non-negative integer');
+      }
+      offset = n;
+    }
+
     const events = db.prepare(
       `SELECT id, actor_id, action, target_type, target_id, result, reason_code, request_id, at
-         FROM audit_events WHERE org_id = ? ORDER BY at DESC LIMIT 200`
-    ).all(params.org);
+         FROM audit_events WHERE org_id = ? ORDER BY at DESC LIMIT ? OFFSET ?`
+    ).all(params.org, limit, offset);
     send(res, 200, { events });
   });
 }

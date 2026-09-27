@@ -38,6 +38,7 @@ export function assertRoleExists(db, role) {
 //   - only owners may assign owner
 // ---------------------------------------------------------------------------
 export function assertCanModify(db, callerRole, targetRole) {
+  if (callerRole === 'owner') return; // Owner can modify any other member (non-self)
   const ranks = roleRanks(db);
   const callerRank = ranks[callerRole] ?? 0;
   const targetRank = ranks[targetRole] ?? 0;
@@ -54,11 +55,12 @@ export function assertCanModify(db, callerRole, targetRole) {
 // assertCanAssignRole: checks both modification authority and owner-only rule.
 // ---------------------------------------------------------------------------
 export function assertCanAssignRole(db, callerRole, newRole) {
-  const ranks = roleRanks(db);
   // Only an owner may confer owner
   if (newRole === 'owner' && callerRole !== 'owner') {
     throw forbidden('only an owner may assign the owner role', 'missing_permission');
   }
+  if (callerRole === 'owner') return; // Owner can assign any role
+  const ranks = roleRanks(db);
   // Caller must outrank the role they're assigning
   const callerRank = ranks[callerRole] ?? 0;
   const newRoleRank = ranks[newRole] ?? 0;

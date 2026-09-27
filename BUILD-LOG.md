@@ -105,7 +105,7 @@ Implemented:
 
 ---
 
-## 2026-09-27 Phase 3 — Routes (all)
+## 2026-09-27 Phase 3 — Routes and verification
 
 Implemented all server-side endpoints: auth, orgs, members, invites, devices, grants, sessions.
 Key choices:
@@ -114,3 +114,17 @@ Key choices:
 - Grant creation enforces no self-grants, no privilege laundering (D9)
 - Device list uses `resolveDevices()` batch — no per-row permission query
 - Session start: 409 DEVICE_BUSY when unique index fires for exclusive sessions
+
+Ran initial `check-api.js`: 57/66 passed, 9 failed. Debugged and fixed:
+1. `deviceBusy` import missing in `sessions.js`, caused 500 ReferenceError instead of 409 DEVICE_BUSY.
+2. `can_perm` in `sessions.js` indexed `perms[permission]` instead of `perms.permissions[permission]`; replaced with canonical `can()` import from `permissions.js`. This fixed live session survival and suspension cascading tests.
+3. `assertCanModify` in `lifecycle.js` prevented owners from demoting fellow non-last owners because `callerRank <= targetRank` was checked blindly. Allowed owner role modification authority while preserving last-owner protection.
+4. `POST /grants`: unknown permission strings like `device:teleport` were failing `assertMayGrant` with 403 `missing_permission` before reaching the FK. Validated against `permission_patterns` table first to reject with 400 `unknown_permission`.
+5. `resolve()` in `permissions.js` omitted `role` on active member resolution. Fixed to return `{ role, permissions: result }`.
+
+Results:
+- `check-jwt.js`: **43/43 passed**
+- `check-permissions.js`: **35/35 passed**
+- `check-personalisation.js`: **18/18 passed**
+- `check-api.js`: **66/66 passed**
+

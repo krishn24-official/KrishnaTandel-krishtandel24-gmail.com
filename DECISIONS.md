@@ -112,6 +112,30 @@ One section per decision that a reviewer might reasonably have made differently.
 
 ---
 
+### Owner modification authority over peers (D8)
+
+**What I chose:** In `assertCanModify` and `assertCanAssignRole`, callers with the `owner` role have universal modification authority over other members (including fellow owners), constrained only by self-modification (`SELF_ROLE_CHANGE`) and last-owner protection (`LAST_OWNER`).
+
+**Why:** Evidence from `scripts/check-api.js:141-150`: "Acme has two owners, so demoting one is legitimate. The LAST_OWNER guard needs an org with exactly one owner... check('demoting a NON-last owner is allowed', PATCH /members/usr_acme_owner -> 200)". Strict rank comparison `callerRank <= targetRank` would forbid owners from modifying other owners since their ranks are identical (`4 <= 4`). Owners sit at the top of the hierarchy and can manage peer memberships subject to LAST_OWNER invariants.
+
+**What I rejected:** Treating owners symmetrically with non-owners under `callerRank <= targetRank`. That broke legitimate multi-owner governance and caused HTTP 403 on valid demotions.
+
+**What would change my mind:** If the specification required a super-owner role or multi-signature consensus for owner modifications.
+
+---
+
+### Pre-validating grant permissions before hold check (D19 before D9)
+
+**What I chose:** In `POST /v1/orgs/:org/grants`, all requested permission patterns are verified against the `permission_patterns` table prior to executing `assertMayGrant`.
+
+**Why:** When a caller submits an unknown permission like `device:teleport`, evaluating `assertMayGrant` first causes the check to fail because the caller does not hold the unknown permission, resulting in `403 FORBIDDEN (missing_permission)`. However, `check-api.js:155-157` asserts that unknown permissions must fail with `400 VALIDATION (unknown_permission)`. Validating against `permission_patterns` first correctly identifies nonexistent permissions as input validation failures before checking the caller's authorization scope.
+
+**What I rejected:** Relying solely on the database foreign key on `grant_permissions` to reject unknown strings. Because `assertMayGrant` precedes the insert, the database FK is unreachable for unknown permissions unless the caller somehow holds a nonexistent permission.
+
+**What would change my mind:** If `assertMayGrant` ignored unknown permissions and let them fall through to the database layer, but that would violate the principle that input validation precedes authorization enforcement.
+
+---
+
 ## Where this repo argues with itself
 
 **PERMISSIONS.md vs AUTH-DATA-MODEL.md on `pv` semantics:**

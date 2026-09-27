@@ -1,7 +1,7 @@
 // Session routes: start, list, get, terminate
-import { send, badRequest, notFound, forbidden, conflict } from '../http.js';
+import { send, badRequest, notFound, forbidden, conflict, deviceBusy } from '../http.js';
 import { newId, nowIso } from '../db.js';
-import { assertCan, assertCanStartSession, resolve } from '../permissions.js';
+import { assertCan, assertCanStartSession, resolve, can } from '../permissions.js';
 import { endActiveSessions, snapshotAuthority, sessionExpiry } from '../lifecycle.js';
 import { audit } from '../audit.js';
 
@@ -36,13 +36,11 @@ export function registerSessionRoutes(router, { db, secret }) {
       ).run(sessionId, params.org, ctx.userId, deviceId, mode, 'active', authorizedBy, at, expiresAt);
     } catch (err) {
       // Partial unique index one_exclusive_session_per_device enforces exclusivity (D10)
-      if (err.message?.includes('UNIQUE') || err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      if (err.code === 'SQLITE_CONSTRAINT_UNIQUE' || (err.message?.includes('UNIQUE') && err.message?.includes('session'))) {
         const existing = db.prepare(
           `SELECT id FROM sessions WHERE device_id = ? AND state = 'active' AND mode IN ('control','terminal')`
         ).get(deviceId);
-        throw Object.assign(new Error('device already has an exclusive session'), {
-          status: 409, code: 'DEVICE_BUSY', reason: existing?.id ?? null,
-        });
+        throw deviceBusy(`device already has an exclusive session: ${existing?.id ?? 'unknown'}`);
       }
       throw err;
     }
@@ -75,7 +73,7 @@ export function registerSessionRoutes(router, { db, secret }) {
     if (!session || session.org_id !== ctx.orgId) throw notFound('session not found');
 
     const isParticipant = session.user_id === ctx.userId;
-    if (!isParticipant && !can_perm(db, ctx, 'session:view')) {
+    if (!isParticipant && !can(db, ctx, 'session:view')) {
       throw notFound('session not found'); // 404 not 403 — invisible
     }
 
@@ -92,7 +90,7 @@ export function registerSessionRoutes(router, { db, secret }) {
     if (session.state !== 'active') throw badRequest('session is already ended');
 
     const isOwn = session.user_id === ctx.userId;
-    const canTerminate = can_perm(db, ctx, 'session:terminate');
+    const canTerminate = can(db, ctx, 'session:terminate');
 
     if (!isOwn && !canTerminate) throw notFound('session not found');
 
@@ -110,11 +108,4 @@ function requireOrgInScope(db, ctx, orgId) {
   if (ctx.orgId !== orgId) throw notFound('organization not found');
   const org = db.prepare('SELECT id FROM organizations WHERE id = ? AND deleted_at IS NULL').get(orgId);
   if (!org) throw notFound('organization not found');
-}
-
-// Helper to check without throwing (for branching logic)
-function can_perm(db, ctx, permission, deviceId = null) {
-  if (ctx.suspended) return false;
-  const perms = resolve(db, { userId: ctx.userId, orgId: ctx.orgId, deviceId });
-  return perms[permission]?.effect === 'allow';
 }

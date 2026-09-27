@@ -134,7 +134,7 @@ export function resolve(db, { userId, orgId, deviceId = null, now = new Date() }
   for (const perm of allPerms) {
     result[perm] = resolveOne(perm, role, baseline, applicableGrants, deviceId);
   }
-  return { permissions: result };
+  return { role, permissions: result };
 }
 
 // ---------------------------------------------------------------------------
