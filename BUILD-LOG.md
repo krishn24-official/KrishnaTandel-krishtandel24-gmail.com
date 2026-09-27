@@ -170,5 +170,20 @@ Commit: 42af434
 - **Fix**: Removed the redundant `--watch` flag to restrict watching specifically to `--watch-path=./server`. Dev server now boots stably with instant Vite HMR for React and hot-reloading when server code changes.
 - **Start Script**: Updated `"start"` script to use Node's `-e` inline environment setter so it runs seamlessly on Windows PowerShell/CMD without POSIX syntax errors.
 
+---
+
+## 2026-09-27 Codebase Cleanup & Final Verification
+
+- **Temporary Files Removed**: Deleted temporary manual testing guide `MANUAL-TEST-GUIDE.md` after manual verification was completed.
+- **Codebase Comments Streamlined**: Replaced verbose developer notes and invariant commentaries across both server (`auth.js`, `context.js`, `permissions.js`, `lifecycle.js`, `audit.js`, `http.js`, `db.js`, `router.js`, `routes/*`) and frontend (`web/main.jsx`) with concise, functional block comments explaining what each function or section does (e.g., `// API client`, `// Password hashing`, `// Resolve permissions`).
+- **Full Test Suite Verification**:
+  - `scripts/check-jwt.js`: **43/43 passed**
+  - `scripts/check-permissions.js`: **35/35 passed**
+  - `scripts/check-personalisation.js`: **18/18 passed**
+  - `scripts/check-api.js`: **66/66 passed**
+  - `npx playwright test`: **25/25 passed**
+  - Total: **187/187 tests passing (100%)**
+
+
 
 

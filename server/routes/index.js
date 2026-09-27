@@ -1,12 +1,11 @@
-// Route registration. First match wins — register specific paths before parameterised ones.
-// '/members/me' before '/members/:userId' etc.
-
+// Route registration
 import { registerAuthRoutes } from './auth.js';
 import { registerOrgRoutes } from './orgs.js';
 import { registerInviteRoutes } from './invites.js';
 import { registerDeviceRoutes } from './devices.js';
 import { registerSessionRoutes } from './sessions.js';
 
+// Register all API routes
 export function registerRoutes(router, deps) {
   registerAuthRoutes(router, deps);
   registerOrgRoutes(router, deps);

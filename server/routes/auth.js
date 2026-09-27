@@ -1,4 +1,4 @@
-// Auth routes: login, refresh, token (org switch), me
+// Auth routes: login, refresh, org switch, me
 import {
   verifyPassword, hashPassword, newRefreshToken, hashRefreshToken,
   issueAccessToken, assertFresh,
@@ -9,19 +9,20 @@ import { orgLevelPermissions } from '../permissions.js';
 
 const REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60;
 
+// Register auth routes
 export function registerAuthRoutes(router, { db, secret }) {
-  // POST /v1/auth/login
+  // Login handler
   router.post('/v1/auth/login', (ctx, _params, res) => {
     const { email, password } = ctx.body ?? {};
     if (!email || !password) throw badRequest('email and password are required');
 
-    // Anti-enumeration: wrong email and wrong password return identical errors.
+    // User credential check
     const user = db.prepare('SELECT id, password_hash FROM users WHERE email = lower(?)').get(email);
     if (!user || !verifyPassword(password, user.password_hash)) {
       throw unauthenticated('invalid credentials');
     }
 
-    // Find user's active memberships — pick first active org alphabetically by org id
+    // Active memberships query
     const memberships = db.prepare(
       `SELECT m.org_id, m.role, m.status, m.perm_version, o.name AS orgName, o.theme
          FROM memberships m
@@ -55,7 +56,7 @@ export function registerAuthRoutes(router, { db, secret }) {
     if (process.env.NODE_ENV === 'production') cookieFlags.push('Secure');
     res.setHeader('Set-Cookie', cookieFlags.join('; '));
 
-    // Shape: { token, orgId, role, orgs }
+    // Send login response
     send(res, 200, {
       token,
       orgId: mem.org_id,
@@ -64,7 +65,7 @@ export function registerAuthRoutes(router, { db, secret }) {
     });
   });
 
-  // POST /v1/auth/refresh
+  // Refresh token handler
   router.post('/v1/auth/refresh', (ctx, _params, res) => {
     const cookieHeader = ctx.req?.headers['cookie'] ?? '';
     const match = cookieHeader.match(/(?:^|;\s*)remoteops_refresh=([^;]+)/);
@@ -80,6 +81,7 @@ export function registerAuthRoutes(router, { db, secret }) {
 
     if (!rt) throw unauthenticated('invalid refresh token');
 
+    // Token reuse detection
     if (rt.revoked_at) {
       db.prepare(`UPDATE refresh_tokens SET revoked_at = ? WHERE family_id = ?`).run(now, rt.family_id);
       throw unauthenticated('refresh token replayed — family revoked');
@@ -87,6 +89,7 @@ export function registerAuthRoutes(router, { db, secret }) {
 
     if (rt.expires_at <= now) throw unauthenticated('refresh token expired');
 
+    // Rotate refresh token
     db.prepare(`UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?`).run(now, rt.id);
 
     const newRaw = newRefreshToken();
@@ -128,7 +131,7 @@ export function registerAuthRoutes(router, { db, secret }) {
     });
   });
 
-  // POST /v1/auth/token — org switch (access token only, same refresh token)
+  // Switch organization token handler
   router.post('/v1/auth/token', (ctx, _params, res) => {
     const { orgId } = ctx.body ?? {};
     if (!orgId) throw badRequest('orgId is required');
@@ -149,7 +152,7 @@ export function registerAuthRoutes(router, { db, secret }) {
     send(res, 200, { token, orgId, role: mem.role });
   });
 
-  // GET /v1/auth/me
+  // Current user info handler
   router.get('/v1/auth/me', (ctx, _params, res) => {
     const user = db.prepare('SELECT id, email, name FROM users WHERE id = ?').get(ctx.userId);
     if (!user) throw notFound();

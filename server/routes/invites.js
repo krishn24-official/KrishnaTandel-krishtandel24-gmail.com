@@ -1,4 +1,4 @@
-// Public invite routes: GET /v1/invites/:token, POST /v1/invites/:token/accept
+// Public invite routes: inspect and accept invites
 import { send, gone, conflict, badRequest, notFound } from '../http.js';
 import { hashInviteToken, hashPassword, issueAccessToken, newRefreshToken, hashRefreshToken } from '../auth.js';
 import { newId, nowIso } from '../db.js';
@@ -6,8 +6,9 @@ import { audit } from '../audit.js';
 
 const REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60;
 
+// Register invite routes
 export function registerInviteRoutes(router, { db, secret }) {
-  // GET /v1/invites/:token — public: peek at an invite without being a member
+  // Inspect invite details
   router.get('/v1/invites/:token', (ctx, params, res) => {
     const hash = hashInviteToken(params.token);
     const invite = db.prepare(
@@ -22,8 +23,6 @@ export function registerInviteRoutes(router, { db, secret }) {
     if (invite.accepted_at) throw conflict('invite has already been accepted');
     if (invite.expires_at <= nowIso()) throw gone('invite has expired');
 
-    // Return only what is needed to render the "You've been invited to X as Y" screen.
-    // No org data, no member list — the token holder is not a member yet.
     send(res, 200, {
       orgName: invite.orgName,
       role: invite.role,
@@ -32,14 +31,13 @@ export function registerInviteRoutes(router, { db, secret }) {
     });
   });
 
-  // POST /v1/invites/:token/accept — public: accept an invite
-  // Does everything in one transaction: upsert user, activate membership, issue tokens.
+  // Accept invite
   router.post('/v1/invites/:token/accept', (ctx, params, res) => {
     const hash = hashInviteToken(params.token);
     const invite = db.prepare(
       `SELECT i.id, i.org_id, i.email, i.role, i.expires_at, i.accepted_at, i.revoked_at
          FROM invites i
-        WHERE i.token_hash = ?`
+         WHERE i.token_hash = ?`
     ).get(hash);
 
     if (!invite) throw notFound('invite not found or expired');
@@ -54,7 +52,7 @@ export function registerInviteRoutes(router, { db, secret }) {
 
     try {
       db.transaction(() => {
-        // Upsert user: if email exists → attach, else create
+        // Upsert user account
         let user = db.prepare('SELECT id FROM users WHERE email = lower(?)').get(invite.email);
         if (!user) {
           const newUserId = newId('usr');
@@ -66,14 +64,13 @@ export function registerInviteRoutes(router, { db, secret }) {
           userId = user.id;
         }
 
-        // Check if already a member
+        // Check existing membership
         const existing = db.prepare(
           `SELECT status, perm_version FROM memberships WHERE org_id = ? AND user_id = ?`
         ).get(invite.org_id, userId);
 
         if (existing) {
           if (existing.status === 'active') throw conflict('already a member');
-          // Reactivate
           db.prepare(
             `UPDATE memberships SET status = 'active', role = ?, perm_version = perm_version + 1, joined_at = ?
               WHERE org_id = ? AND user_id = ?`
@@ -88,7 +85,7 @@ export function registerInviteRoutes(router, { db, secret }) {
           perm_version = pv;
         }
 
-        // Mark invite as accepted (single-use)
+        // Mark invite accepted
         db.prepare(`UPDATE invites SET accepted_at = ?, accepted_by = ? WHERE id = ?`)
           .run(nowIso(), userId, invite.id);
       })();
@@ -99,7 +96,7 @@ export function registerInviteRoutes(router, { db, secret }) {
       throw err;
     }
 
-    // Issue tokens for the new member
+    // Issue session tokens
     const accessToken = issueAccessToken({
       userId, orgId: invite.org_id, role: invite.role, permVersion: perm_version,
     }, secret);

@@ -5,8 +5,9 @@ import { assertCan, assertCanStartSession, resolve, can } from '../permissions.j
 import { endActiveSessions, snapshotAuthority, sessionExpiry } from '../lifecycle.js';
 import { audit } from '../audit.js';
 
+// Register session routes
 export function registerSessionRoutes(router, { db, secret }) {
-  // POST /v1/orgs/:org/sessions — start a session (compound check)
+  // Start session
   router.post('/v1/orgs/:org/sessions', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     if (ctx.suspended) throw forbidden('account is suspended', 'suspended');
@@ -15,13 +16,12 @@ export function registerSessionRoutes(router, { db, secret }) {
     if (!deviceId) throw badRequest('deviceId is required');
     if (!['view','control','terminal'].includes(mode)) throw badRequest("mode must be 'view', 'control', or 'terminal'");
 
-    // Device must be in this org
+    // Device existence check
     const device = db.prepare(`SELECT id FROM devices WHERE id = ? AND org_id = ? AND deleted_at IS NULL`)
       .get(deviceId, params.org);
     if (!device) throw notFound('device not found');
 
-    // Compound check: session:start AND the mode permission, both on the same device.
-    // assertCanStartSession distinguishes which permission was missing.
+    // Permission and mode check
     assertCanStartSession(db, ctx, mode, deviceId);
 
     const sessionId = newId('ses');
@@ -35,7 +35,6 @@ export function registerSessionRoutes(router, { db, secret }) {
          VALUES (?,?,?,?,?,?,?,?,?)`
       ).run(sessionId, params.org, ctx.userId, deviceId, mode, 'active', authorizedBy, at, expiresAt);
     } catch (err) {
-      // Partial unique index one_exclusive_session_per_device enforces exclusivity (D10)
       if (err.code === 'SQLITE_CONSTRAINT_UNIQUE' || (err.message?.includes('UNIQUE') && err.message?.includes('session'))) {
         const existing = db.prepare(
           `SELECT id FROM sessions WHERE device_id = ? AND state = 'active' AND mode IN ('control','terminal')`
@@ -49,7 +48,7 @@ export function registerSessionRoutes(router, { db, secret }) {
     send(res, 201, { id: sessionId, deviceId, mode, state: 'active', expiresAt });
   });
 
-  // GET /v1/orgs/:org/sessions
+  // List sessions
   router.get('/v1/orgs/:org/sessions', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'session:view');
@@ -62,25 +61,24 @@ export function registerSessionRoutes(router, { db, secret }) {
     send(res, 200, { sessions });
   });
 
-  // GET /v1/sessions/:id — participant OR session:view
+  // Get session details
   router.get('/v1/sessions/:id', (ctx, params, res) => {
     const session = db.prepare(
       `SELECT id, org_id, user_id, device_id, mode, state, end_reason, authorized_by, started_at, expires_at, ended_at
          FROM sessions WHERE id = ?`
     ).get(params.id);
 
-    // Must be in caller's org (structural isolation), or invisible
     if (!session || session.org_id !== ctx.orgId) throw notFound('session not found');
 
     const isParticipant = session.user_id === ctx.userId;
     if (!isParticipant && !can(db, ctx, 'session:view')) {
-      throw notFound('session not found'); // 404 not 403 — invisible
+      throw notFound('session not found');
     }
 
     send(res, 200, session);
   });
 
-  // DELETE /v1/sessions/:id — own session OR session:terminate
+  // Terminate session
   router.delete('/v1/sessions/:id', (ctx, params, res) => {
     const session = db.prepare(
       `SELECT id, org_id, user_id, state FROM sessions WHERE id = ?`
@@ -104,6 +102,7 @@ export function registerSessionRoutes(router, { db, secret }) {
   });
 }
 
+// Scope check helper
 function requireOrgInScope(db, ctx, orgId) {
   if (ctx.orgId !== orgId) throw notFound('organization not found');
   const org = db.prepare('SELECT id FROM organizations WHERE id = ? AND deleted_at IS NULL').get(orgId);

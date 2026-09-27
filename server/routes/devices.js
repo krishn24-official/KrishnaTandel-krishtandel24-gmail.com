@@ -1,4 +1,4 @@
-// Device and grant routes
+// Device and grant management routes
 import { send, badRequest, notFound, forbidden, conflict, HttpError } from '../http.js';
 import { newId, nowIso, bumpPermVersion } from '../db.js';
 import { assertCan, can, resolveDevices, assertMayGrant } from '../permissions.js';
@@ -6,10 +6,9 @@ import { endActiveSessions } from '../lifecycle.js';
 import { audit } from '../audit.js';
 import { normalizeTs } from '../http.js';
 
+// Register device and grant routes
 export function registerDeviceRoutes(router, { db, secret }) {
-  // ── Devices ─────────────────────────────────────────────────────────────
-
-  // GET /v1/orgs/:org/devices
+  // List devices
   router.get('/v1/orgs/:org/devices', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'device:list');
@@ -20,11 +19,10 @@ export function registerDeviceRoutes(router, { db, secret }) {
 
     if (!rawDevices.length) return send(res, 200, { devices: [] });
 
-    // Batch resolve — one call for all devices, no N+1
+    // Batch resolve device permissions
     const deviceIds = rawDevices.map(d => d.id);
     const { byDevice } = resolveDevices(db, { userId: ctx.userId, orgId: params.org, deviceIds });
 
-    // Filter: device:view = absent from list (not redacted, not listed at all)
     const devices = rawDevices
       .filter(d => byDevice[d.id]?.['device:view']?.effect === 'allow')
       .map(d => ({
@@ -38,7 +36,7 @@ export function registerDeviceRoutes(router, { db, secret }) {
     send(res, 200, { devices });
   });
 
-  // GET /v1/orgs/:org/devices/:id
+  // Get single device
   router.get('/v1/orgs/:org/devices/:id', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     const device = getDevice(db, params.org, params.id);
@@ -47,7 +45,7 @@ export function registerDeviceRoutes(router, { db, secret }) {
     send(res, 200, { ...device, online: device.online === 1, permissions: byDevice[device.id] });
   });
 
-  // POST /v1/orgs/:org/devices — provision
+  // Provision device
   router.post('/v1/orgs/:org/devices', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'device:provision');
@@ -65,7 +63,7 @@ export function registerDeviceRoutes(router, { db, secret }) {
     send(res, 201, { id, name: String(name).trim(), kind, online: false });
   });
 
-  // PATCH /v1/orgs/:org/devices/:id — rename/update
+  // Update device
   router.patch('/v1/orgs/:org/devices/:id', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     const device = getDevice(db, params.org, params.id);
@@ -79,7 +77,7 @@ export function registerDeviceRoutes(router, { db, secret }) {
     send(res, 200, { id: device.id, name: String(name).trim() });
   });
 
-  // DELETE /v1/orgs/:org/devices/:id — decommission (soft delete)
+  // Decommission device
   router.delete('/v1/orgs/:org/devices/:id', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     const device = getDevice(db, params.org, params.id);
@@ -94,7 +92,7 @@ export function registerDeviceRoutes(router, { db, secret }) {
     send(res, 204, undefined);
   });
 
-  // POST /v1/orgs/:org/devices/:id/transfer — transfer to another org
+  // Transfer device
   router.post('/v1/orgs/:org/devices/:id/transfer', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     const device = getDevice(db, params.org, params.id);
@@ -103,13 +101,11 @@ export function registerDeviceRoutes(router, { db, secret }) {
     const { targetOrgId } = ctx.body;
     if (!targetOrgId) throw badRequest('targetOrgId is required');
 
-    // Must also have device:provision in the target org
     const targetMem = db.prepare(
       `SELECT role, status FROM memberships WHERE user_id = ? AND org_id = ? AND status = 'active'`
     ).get(ctx.userId, targetOrgId);
     if (!targetMem) throw notFound('target organization not found or no membership');
 
-    // Check device:provision in target org using a temporary context
     const targetCtx = { userId: ctx.userId, orgId: targetOrgId, role: targetMem.role, suspended: false };
     if (!can(db, targetCtx, 'device:provision')) {
       throw forbidden('missing device:provision in target organization', 'missing_permission');
@@ -124,9 +120,7 @@ export function registerDeviceRoutes(router, { db, secret }) {
     send(res, 200, { id: device.id, orgId: targetOrgId });
   });
 
-  // ── Grants ──────────────────────────────────────────────────────────────
-
-  // POST /v1/orgs/:org/grants
+  // Create grant
   router.post('/v1/orgs/:org/grants', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'grant:create');
@@ -136,22 +130,22 @@ export function registerDeviceRoutes(router, { db, secret }) {
     if (!effect || !['allow','deny'].includes(effect)) throw badRequest("effect must be 'allow' or 'deny'");
     if (!Array.isArray(permissions) || permissions.length === 0) throw badRequest('permissions must be a non-empty array');
 
-    // No self-grants (D9)
+    // Self grant validation
     if (userId === ctx.userId) throw forbidden('cannot create a grant for yourself', 'missing_permission');
 
-    // Target must be an active member
+    // Member existence check
     const targetMem = db.prepare(
       `SELECT id FROM memberships WHERE org_id = ? AND user_id = ? AND status = 'active'`
     ).get(params.org, userId);
     if (!targetMem) throw notFound('user not found in this organization');
 
-    // Device must belong to this org (cross-org is invisible → 404)
+    // Device scope check
     if (deviceId) {
       const dev = db.prepare(`SELECT id FROM devices WHERE id = ? AND org_id = ? AND deleted_at IS NULL`).get(deviceId, params.org);
       if (!dev) throw notFound('device not found');
     }
 
-    // Validate timestamps
+    // Timestamp validation
     const normStarts = normalizeTs(startsAt ?? null, 'startsAt');
     const normExpires = normalizeTs(expiresAt ?? null, 'expiresAt');
     const nowStr = nowIso();
@@ -159,7 +153,7 @@ export function registerDeviceRoutes(router, { db, secret }) {
       throw new HttpError(400, 'GRANT_EXPIRED', 'expiresAt is in the past');
     }
 
-    // D19: validate that all requested permissions exist in permission_patterns table
+    // Permission patterns check
     const validPatterns = new Set(db.prepare('SELECT pattern FROM permission_patterns').all().map(r => r.pattern));
     for (const p of permissions) {
       if (!validPatterns.has(p)) {
@@ -167,7 +161,7 @@ export function registerDeviceRoutes(router, { db, secret }) {
       }
     }
 
-    // No privilege laundering: caller must hold every permission they're granting (D9)
+    // Authority grant check
     assertMayGrant(db, ctx, permissions, deviceId ?? null);
 
     const grantId = newId('grt');
@@ -181,7 +175,6 @@ export function registerDeviceRoutes(router, { db, secret }) {
         try { insertPerm.run(grantId, p); }
         catch (err) {
           if (err.message?.includes('FOREIGN KEY')) {
-            // The FK on grant_permissions rejects unknown permission strings (D19)
             throw badRequest(`unknown permission: ${p}`, 'unknown_permission');
           }
           throw err;
@@ -195,7 +188,7 @@ export function registerDeviceRoutes(router, { db, secret }) {
     send(res, 201, { id: grantId, userId, deviceId: deviceId ?? null, effect, permissions });
   });
 
-  // GET /v1/orgs/:org/grants
+  // List grants
   router.get('/v1/orgs/:org/grants', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'user:read');
@@ -213,7 +206,7 @@ export function registerDeviceRoutes(router, { db, secret }) {
     send(res, 200, { grants: grants.map(g => ({ ...g, permissions: g.perms?.split(',') ?? [] })) });
   });
 
-  // DELETE /v1/orgs/:org/grants/:id — revoke
+  // Revoke grant
   router.delete('/v1/orgs/:org/grants/:id', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'grant:revoke');
@@ -233,8 +226,7 @@ export function registerDeviceRoutes(router, { db, secret }) {
   });
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────
-
+// Scope check helper
 function requireOrgInScope(db, ctx, orgId) {
   if (ctx.orgId !== orgId) throw notFound('organization not found');
   const org = db.prepare('SELECT id FROM organizations WHERE id = ? AND deleted_at IS NULL').get(orgId);
@@ -242,6 +234,7 @@ function requireOrgInScope(db, ctx, orgId) {
   return org;
 }
 
+// Device lookup helper
 function getDevice(db, orgId, deviceId) {
   const d = db.prepare(`SELECT id, name, kind, online FROM devices WHERE id = ? AND org_id = ? AND deleted_at IS NULL`).get(deviceId, orgId);
   if (!d) throw notFound('device not found');

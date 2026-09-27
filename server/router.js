@@ -1,19 +1,16 @@
-// A deliberately tiny router. Roughly 35 lines, no dependencies, nothing hidden.
-//
-// This is provided so you don't spend hackathon time writing routing plumbing.
-// Read it once — it is the whole story of how a request becomes a handler call.
-
+// Router implementation
 const PARAM = /^:(.+)$/;
 
+// Create HTTP router
 export function createRouter() {
   const routes = [];
 
+  // Register route
   function add(method, pattern, handler) {
     routes.push({ method, segments: split(pattern), handler });
   }
 
-  // Returns { handler, params } or null. First match wins, so register
-  // specific paths before parameterised ones if they could overlap.
+  // Match route
   function match(method, pathname) {
     const parts = split(pathname);
 
@@ -50,6 +47,7 @@ export function createRouter() {
   };
 }
 
+// Split URL path
 function split(path) {
   return path.split('/').filter(Boolean);
 }

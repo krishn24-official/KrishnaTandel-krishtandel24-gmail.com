@@ -1,4 +1,4 @@
-// Orgs + members + invites + effective permissions + audit
+// Organization and membership routes
 import { send, badRequest, notFound, forbidden, conflict, gone, lastOwner, selfRoleChange } from '../http.js';
 import { newId, nowIso, bumpPermVersion } from '../db.js';
 import { assertCan, orgLevelPermissions, resolve } from '../permissions.js';
@@ -12,10 +12,9 @@ import { audit } from '../audit.js';
 const THEMES = ['cobalt', 'amber', 'moss', 'plum', 'rust', 'teal'];
 const INVITE_TTL_DAYS = 7;
 
+// Register organization routes
 export function registerOrgRoutes(router, { db, secret }) {
-  // ── Orgs ──────────────────────────────────────────────────────────────────
-
-  // GET /v1/orgs — list orgs the caller belongs to
+  // List organizations
   router.get('/v1/orgs', (ctx, _params, res) => {
     const orgs = db.prepare(
       `SELECT o.id, o.name, o.theme, m.role
@@ -27,7 +26,7 @@ export function registerOrgRoutes(router, { db, secret }) {
     send(res, 200, { orgs });
   });
 
-  // POST /v1/orgs — create org (creator becomes owner)
+  // Create organization
   router.post('/v1/orgs', (ctx, _params, res) => {
     const { name, theme } = ctx.body;
     if (!name || typeof name !== 'string' || name.trim().length < 1) {
@@ -52,7 +51,7 @@ export function registerOrgRoutes(router, { db, secret }) {
     send(res, 201, { id: orgId, name: name.trim(), theme: finalTheme, role: 'owner' });
   });
 
-  // PATCH /v1/orgs/:org — rename/reconfigure
+  // Update organization
   router.patch('/v1/orgs/:org', (ctx, params, res) => {
     const org = requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'org:update');
@@ -70,7 +69,7 @@ export function registerOrgRoutes(router, { db, secret }) {
     send(res, 200, db.prepare('SELECT id, name, theme FROM organizations WHERE id = ?').get(params.org));
   });
 
-  // DELETE /v1/orgs/:org
+  // Delete organization
   router.delete('/v1/orgs/:org', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'org:delete');
@@ -80,9 +79,7 @@ export function registerOrgRoutes(router, { db, secret }) {
     send(res, 204, undefined);
   });
 
-  // ── Members ──────────────────────────────────────────────────────────────
-
-  // GET /v1/orgs/:org/members
+  // List organization members
   router.get('/v1/orgs/:org/members', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'user:read');
@@ -96,7 +93,7 @@ export function registerOrgRoutes(router, { db, secret }) {
     send(res, 200, { members });
   });
 
-  // PATCH /v1/orgs/:org/members/:userId — change role
+  // Update member role
   router.patch('/v1/orgs/:org/members/:userId', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'user:role:update');
@@ -123,7 +120,7 @@ export function registerOrgRoutes(router, { db, secret }) {
     send(res, 200, { userId: params.userId, role: newRole });
   });
 
-  // POST /v1/orgs/:org/members/:userId/suspend
+  // Suspend member
   router.post('/v1/orgs/:org/members/:userId/suspend', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'user:remove');
@@ -141,7 +138,7 @@ export function registerOrgRoutes(router, { db, secret }) {
     send(res, 200, { userId: params.userId, status: 'suspended' });
   });
 
-  // DELETE /v1/orgs/:org/members/:userId/suspend — reinstate
+  // Reinstate suspended member
   router.delete('/v1/orgs/:org/members/:userId/suspend', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'user:remove');
@@ -160,7 +157,7 @@ export function registerOrgRoutes(router, { db, secret }) {
     send(res, 200, { userId: params.userId, status: 'active' });
   });
 
-  // DELETE /v1/orgs/:org/members/me — self-leave
+  // Self remove membership
   router.delete('/v1/orgs/:org/members/me', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertNotLastOwner(db, params.org, ctx.userId);
@@ -176,7 +173,7 @@ export function registerOrgRoutes(router, { db, secret }) {
     send(res, 204, undefined);
   });
 
-  // DELETE /v1/orgs/:org/members/:userId — remove member
+  // Remove member
   router.delete('/v1/orgs/:org/members/:userId', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'user:remove');
@@ -195,9 +192,7 @@ export function registerOrgRoutes(router, { db, secret }) {
     send(res, 204, undefined);
   });
 
-  // ── Invites ──────────────────────────────────────────────────────────────
-
-  // POST /v1/orgs/:org/invites
+  // Create invite
   router.post('/v1/orgs/:org/invites', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'user:invite');
@@ -208,7 +203,6 @@ export function registerOrgRoutes(router, { db, secret }) {
     assertRoleExists(db, role);
     assertCanAssignRole(db, ctx.role, role);
 
-    // Check if already an active member
     const existing = db.prepare(
       `SELECT status FROM memberships WHERE org_id = ? AND user_id = (SELECT id FROM users WHERE email = ?)`
     ).get(params.org, normalizedEmail);
@@ -229,11 +223,10 @@ export function registerOrgRoutes(router, { db, secret }) {
     }
 
     audit(db, { orgId: params.org, actorId: ctx.userId, action: 'invite.create', targetType: 'invite', targetId: inviteId, result: 'allow', requestId: ctx.requestId });
-    // Return raw token exactly once — never stored in plaintext
     send(res, 201, { id: inviteId, inviteToken: rawToken, email: normalizedEmail, role, expiresAt });
   });
 
-  // GET /v1/orgs/:org/invites
+  // List pending invites
   router.get('/v1/orgs/:org/invites', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'user:invite');
@@ -245,7 +238,7 @@ export function registerOrgRoutes(router, { db, secret }) {
     send(res, 200, { invites });
   });
 
-  // DELETE /v1/orgs/:org/invites/:id — cancel invite
+  // Revoke invite
   router.delete('/v1/orgs/:org/invites/:id', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'user:invite');
@@ -258,9 +251,7 @@ export function registerOrgRoutes(router, { db, secret }) {
     send(res, 204, undefined);
   });
 
-  // ── Effective permissions ─────────────────────────────────────────────────
-
-  // GET /v1/orgs/:org/users/:userId/effective
+  // Effective permissions query
   router.get('/v1/orgs/:org/users/:userId/effective', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     const isSelf = params.userId === ctx.userId;
@@ -274,14 +265,11 @@ export function registerOrgRoutes(router, { db, secret }) {
     send(res, 200, { role: mem.role, permissions });
   });
 
-  // ── Audit ─────────────────────────────────────────────────────────────────
-
-  // GET /v1/orgs/:org/audit — with pagination
+  // List audit events
   router.get('/v1/orgs/:org/audit', (ctx, params, res) => {
     requireOrgInScope(db, ctx, params.org);
     assertCan(db, ctx, 'audit:read');
 
-    // Parse and validate limit + offset from ctx.query (URLSearchParams)
     const rawLimit = ctx.query?.get('limit') ?? null;
     const rawOffset = ctx.query?.get('offset') ?? null;
 
@@ -312,17 +300,15 @@ export function registerOrgRoutes(router, { db, secret }) {
   });
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────
-
+// Scope validation helper
 function requireOrgInScope(db, ctx, orgId) {
-  // The token's org claim is the structural isolation boundary.
-  // A request to a different org is a 404 — never 403.
   if (ctx.orgId !== orgId) throw notFound('organization not found');
   const org = db.prepare('SELECT id FROM organizations WHERE id = ? AND deleted_at IS NULL').get(orgId);
   if (!org) throw notFound('organization not found');
   return org;
 }
 
+// Active member query helper
 function getActiveMember(db, orgId, userId) {
   const mem = db.prepare(
     `SELECT role, status FROM memberships WHERE org_id = ? AND user_id = ? AND status = 'active'`
@@ -330,5 +316,3 @@ function getActiveMember(db, orgId, userId) {
   if (!mem) throw notFound('member not found');
   return mem;
 }
-
-

@@ -1,21 +1,8 @@
-// Shared domain rules: role ranks, last-owner protection, ending sessions.
-//
-// IMPORTANT: roles.rank is MODIFICATION AUTHORITY ONLY (D8).
-// It must NEVER answer a can() question. operator and auditor are unordered
-// by permissions — ranking them as integers produces wrong answers.
-//
-// Session ending rules (PERMISSIONS.md §7):
-//   - Permission changes do NOT end sessions in flight (grandfathering)
-//   - Suspension, removal, device transfer DO cascade
-//   - Every session has expires_at so grandfathering is never indefinite
-
+// Shared lifecycle and domain rules
 import { forbidden, conflict, lastOwner, badRequest } from './http.js';
 import { nowIso } from './db.js';
 
-// ---------------------------------------------------------------------------
-// roleRanks: returns { [roleKey]: rank } from the DB.
-// Reads at call time — supports the undocumented extra role from personalisation.
-// ---------------------------------------------------------------------------
+// Role ranks query
 export function roleRanks(db) {
   const rows = db.prepare('SELECT key, rank FROM roles').all();
   const map = {};
@@ -23,22 +10,15 @@ export function roleRanks(db) {
   return map;
 }
 
-// ---------------------------------------------------------------------------
-// assertRoleExists: throws 400 if the role key isn't in the DB.
-// ---------------------------------------------------------------------------
+// Role existence check
 export function assertRoleExists(db, role) {
   const row = db.prepare('SELECT key FROM roles WHERE key = ?').get(role);
   if (!row) throw badRequest(`unknown role: ${role}`);
 }
 
-// ---------------------------------------------------------------------------
-// assertCanModify: enforces modification authority (D8).
-//   - caller must outrank target (strictly)
-//   - equal rank is forbidden
-//   - only owners may assign owner
-// ---------------------------------------------------------------------------
+// Member modification authority check
 export function assertCanModify(db, callerRole, targetRole) {
-  if (callerRole === 'owner') return; // Owner can modify any other member (non-self)
+  if (callerRole === 'owner') return;
   const ranks = roleRanks(db);
   const callerRank = ranks[callerRole] ?? 0;
   const targetRank = ranks[targetRole] ?? 0;
@@ -51,17 +31,13 @@ export function assertCanModify(db, callerRole, targetRole) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// assertCanAssignRole: checks both modification authority and owner-only rule.
-// ---------------------------------------------------------------------------
+// Role assignment authority check
 export function assertCanAssignRole(db, callerRole, newRole) {
-  // Only an owner may confer owner
   if (newRole === 'owner' && callerRole !== 'owner') {
     throw forbidden('only an owner may assign the owner role', 'missing_permission');
   }
-  if (callerRole === 'owner') return; // Owner can assign any role
+  if (callerRole === 'owner') return;
   const ranks = roleRanks(db);
-  // Caller must outrank the role they're assigning
   const callerRank = ranks[callerRole] ?? 0;
   const newRoleRank = ranks[newRole] ?? 0;
   if (callerRank <= newRoleRank) {
@@ -69,10 +45,7 @@ export function assertCanAssignRole(db, callerRole, newRole) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// assertNotLastOwner: prevents leaving the org ownerless.
-// Throws 409 LAST_OWNER if this user is the only active owner.
-// ---------------------------------------------------------------------------
+// Last active owner check
 export function assertNotLastOwner(db, orgId, userId) {
   const ownerCount = db.prepare(
     `SELECT COUNT(*) AS n FROM memberships
@@ -88,11 +61,7 @@ export function assertNotLastOwner(db, orgId, userId) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// endActiveSessions: end all active sessions for a user (or device) in an org.
-// Trigger: suspension, removal, or device transfer/decommission.
-// Permission changes do NOT trigger this — that is intentional (D20 grandfathering).
-// ---------------------------------------------------------------------------
+// End active sessions
 export function endActiveSessions(db, { orgId, userId = null, deviceId = null, reason, exceptSessionId = null }) {
   const at = nowIso();
 
@@ -112,7 +81,7 @@ export function endActiveSessions(db, { orgId, userId = null, deviceId = null, r
               WHERE org_id = ? AND device_id = ? AND state = 'active'`;
     params.push(reason, at, orgId, deviceId);
   } else {
-    return; // nothing to do
+    return;
   }
 
   if (exceptSessionId) {
@@ -123,10 +92,7 @@ export function endActiveSessions(db, { orgId, userId = null, deviceId = null, r
   db.prepare(query).run(...params);
 }
 
-// ---------------------------------------------------------------------------
-// snapshotAuthority: create the authorized_by JSON blob stored on sessions.
-// Captures role and active grant IDs at session-start time.
-// ---------------------------------------------------------------------------
+// Authority snapshot
 export function snapshotAuthority(db, { userId, orgId, deviceId }) {
   const membership = db.prepare(
     `SELECT role FROM memberships WHERE user_id = ? AND org_id = ?`
@@ -134,7 +100,6 @@ export function snapshotAuthority(db, { userId, orgId, deviceId }) {
 
   const now = new Date().toISOString();
 
-  // Active grants that apply to this device (device-scoped OR org-wide)
   const grants = db.prepare(
     `SELECT g.id FROM grants g
       WHERE g.user_id = ? AND g.org_id = ?
@@ -151,10 +116,7 @@ export function snapshotAuthority(db, { userId, orgId, deviceId }) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// sessionExpiry: returns the ISO timestamp for a new session's expires_at.
-// expires_at = now + org.max_session_minutes.
-// ---------------------------------------------------------------------------
+// Calculate session expiry
 export function sessionExpiry(db, orgId) {
   const org = db.prepare('SELECT max_session_minutes FROM organizations WHERE id = ?').get(orgId);
   const minutes = org?.max_session_minutes ?? 60;

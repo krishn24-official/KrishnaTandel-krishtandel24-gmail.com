@@ -1,11 +1,4 @@
-// The whole application: one process, one port.
-//
-//   /v1/*  -> the API (routes registered in server/routes/)
-//   else   -> the SPA (Vite middleware in dev for HMR, static dist/ in production)
-//
-// Run:  npm run dev     (one command, both halves, hot reload)
-//       npm run build && npm start
-
+// Application entry point and HTTP server
 import http from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
@@ -17,16 +10,18 @@ import { send, sendError, readJson, notFound } from './http.js';
 import { authenticate } from './context.js';
 import { registerRoutes } from './routes/index.js';
 
+// Server configuration
 const DEV = process.env.NODE_ENV !== 'production';
 const PORT = Number(process.env.PORT ?? 8080);
 const SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-me';
 const DIST = fileURLToPath(new URL('../dist/', import.meta.url));
 
+// Database and router setup
 const db = openDatabase();
 const router = createRouter();
 registerRoutes(router, { db, secret: SECRET });
 
-// Routes reachable without a token. Everything else requires a valid JWT.
+// Public endpoints
 const PUBLIC_ROUTES = new Set([
   'POST /v1/auth/login',
   'POST /v1/auth/refresh',
@@ -34,9 +29,7 @@ const PUBLIC_ROUTES = new Set([
   'POST /v1/invites/:token/accept',
 ]);
 
-// ---------------------------------------------------------------------------
-// The request pipeline. Read this top to bottom and you know how the app works.
-// ---------------------------------------------------------------------------
+// API request handler
 async function handleApi(req, res, url) {
   const requestId = `req_${crypto.randomUUID().slice(0, 8)}`;
 
@@ -61,9 +54,7 @@ async function handleApi(req, res, url) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Production static files. ~25 lines, no dependency, no surprises.
-// ---------------------------------------------------------------------------
+// Static MIME types
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -75,8 +66,8 @@ const MIME = {
   '.woff2': 'font/woff2',
 };
 
+// Static file server
 async function serveStatic(req, res, url) {
-  // normalize() collapses '..' so a crafted path cannot escape dist/.
   const rel = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, '');
   let file = join(DIST, rel);
 
@@ -84,7 +75,7 @@ async function serveStatic(req, res, url) {
     const info = await stat(file);
     if (info.isDirectory()) file = join(file, 'index.html');
   } catch {
-    file = join(DIST, 'index.html'); // SPA fallback: let the client router handle it
+    file = join(DIST, 'index.html');
   }
 
   try {
@@ -99,9 +90,7 @@ async function serveStatic(req, res, url) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Boot
-// ---------------------------------------------------------------------------
+// Development Vite middleware
 let vite = null;
 if (DEV) {
   const { createServer } = await import('vite');
@@ -109,6 +98,7 @@ if (DEV) {
   console.log('vite middleware attached (HMR enabled)');
 }
 
+// HTTP server instance
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
@@ -120,10 +110,12 @@ const server = http.createServer((req, res) => {
   return serveStatic(req, res, url);
 });
 
+// Start listening
 server.listen(PORT, () => {
   console.log(`RemoteOps on http://localhost:${PORT}  (${DEV ? 'development' : 'production'})`);
 });
 
+// Process shutdown handlers
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
     server.close(() => {

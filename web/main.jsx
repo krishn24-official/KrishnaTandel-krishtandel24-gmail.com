@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';
 
-// Central API fetch helper: transmits JWT bearer token, never touches web storage.
+// API client
 async function api(method, path, body = null, token = null) {
   const headers = {};
   if (token) headers['authorization'] = `Bearer ${token}`;
@@ -231,9 +231,9 @@ export function App() {
     }
   }, []);
 
-  // Refresh token on reload (D13 in-memory session restoration)
+  // Restore session on mount
   useEffect(() => {
-    if (inviteToken) return;
+    if (window.location.pathname.startsWith('/invite/')) return;
     api('POST', '/v1/auth/refresh')
       .then(async (data) => {
         const me = await api('GET', '/v1/auth/me', null, data.token);
@@ -242,10 +242,8 @@ export function App() {
         setActiveOrg(curOrg);
         setPermissions(me.permissions || {});
       })
-      .catch(() => {
-        // No valid refresh token, user stays at login screen
-      });
-  }, [inviteToken]);
+      .catch(() => {});
+  }, []);
 
   // Load context on login
   const handleLoginSuccess = async (loginData) => {
@@ -286,7 +284,7 @@ export function App() {
 
     try {
       const newOrg = await api('POST', '/v1/orgs', { name: name.trim() }, auth.token);
-      // Mint new token for newly created org
+      // Mint token for new org
       const tokenRes = await api('POST', '/v1/auth/token', { orgId: newOrg.id }, auth.token);
       const updatedOrgs = [...auth.orgs, newOrg];
       const newAuth = { ...auth, token: tokenRes.token, orgId: newOrg.id, role: 'owner', orgs: updatedOrgs };
@@ -425,7 +423,7 @@ export function App() {
     }
   };
 
-  // 1. Invite acceptance route
+  // Invite acceptance view
   if (inviteToken) {
     return (
       <InviteAccept
@@ -438,12 +436,12 @@ export function App() {
     );
   }
 
-  // 2. Unauthenticated route
+  // Login view
   if (!auth?.token || !activeOrg) {
     return <LoginForm onLoginSuccess={handleLoginSuccess} />;
   }
 
-  // 3. Permission evaluations for navigation
+  // Navigation permissions
   const canDevices = permissions['device:list']?.effect === 'allow';
   const canPeople = permissions['user:read']?.effect === 'allow';
   const canGrants = permissions['user:read']?.effect === 'allow' || permissions['grant:create']?.effect === 'allow' || permissions['grant:revoke']?.effect === 'allow';
